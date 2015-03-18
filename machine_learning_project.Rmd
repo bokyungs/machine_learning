@@ -1,0 +1,117 @@
+---
+title: "Practical Machine Learning Project"
+author: "Bokyung Yang-Stephens"
+date: "Saturday, March 14, 2015"
+output: html_document
+---
+Six participants performed the Unilateral Dumbbell Bicep Curls in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). This report is to use the training data from accelerometers on the belt, forearm, arm, and dumbell of the participants and predict the fashion in which the exercise was performed. The info and data for this report comes from http://groupware.les.inf.puc-rio.br/har.  The column(variable/predictor) name we are to predict is called "classe".
+
+First load all the libraries.
+```{r, loadLibs}
+library(caret)
+library(randomForest)
+library(ggplot2)
+```
+
+Read in the training data we'll use to build a classification model.
+
+```{r, readInput, cache=TRUE}
+setwd("C:/Users/Po/data_science/machine_learning/project")
+if (!file.exists("./pml-training.csv")) {
+   url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+   download.file(url, "./pml-training.csv")
+}
+data <- read.csv("pml-training.csv")
+```
+
+Check out the training data.  What are the fields and how big is it?  Do you see anything unusual?
+
+```{r, inputExploration}
+dim(data)
+#names(data)
+#head(data)
+```
+
+There are 160 columns in the data.  Several columns appear to have mostly NAs.
+We need to remove those columns where the majority of the values are NAs and create a new data frame. For each column (variable), we count the total number of NAs and keep only those columns if the number of NAs is 0.
+
+```{r, dataCleanup}
+countNAs <- sapply(data, function(x) sum(is.na(x)))
+indices <- which(t(countNAs) == 0)
+subData <- data[,indices]
+dim(subData)
+```
+After removing the columns with NAs, the number of columns decreased from 160 to 93.  Next, we identify which variables have near zero variance. The idea is that a variable with a near zero variance will not be a good predictor.  nsv below contains a variable called, nzv, which is TRUE if the variable has a near zero variance.  
+```{r, removeZeroVar}
+nsv <- nearZeroVar(subData, saveMetrics=TRUE)
+indices <- which(nsv$nzv == TRUE)
+subData <- subData[,-indices]
+dim(subData)
+```
+The number of columns (variables, predictors) has been further reduced to 59.  Let's take the training data into two sets: training and validation.  The validation set will be used to predict the out-of-sample error.
+```{r, trainPartition}
+set.seed(12345)
+inTrain <- createDataPartition(y=subData$classe, p=0.8, list=FALSE)
+training <- subData[inTrain,]
+dim(training)
+validation <- subData[-inTrain,]
+dim(validation)
+hist(as.numeric(training$classe), col="blue", xlab="Classe", main="Histogram of Training Classe")
+```
+
+We divide the original training set into 80% training and 20% validation.  The model training will be done on the training set and the validation set will be used to compute the out of sample error.  The histogram shows that the first classe has more items than the others.  For building the model, I tried both random forests and the generalized boosted models (GBM).  On the training set using all 58 predictors, the accuracy of random forests was 100% while that of GBM was 99.9%.  Thus, I decided to go with random forests.  
+```{r, trainMode, cache=TRUE}
+modFit <- randomForest(classe~.,data=training)
+predTrain <- predict(modFit, newdata=training)
+imp <- varImp(modFit)
+#plot(varImp(modFit, scale=F))
+modFit
+```
+We select the predictors based on their scores returned from the varImp function.  We take those predictors (variables ) whose score is greater than 100.0 but remove the variables like X, raw_timestamp_part_1, cvtd_timestamp that are specific to the order and time in which the data was collected to avoid overfitting.  We take the first 17 predictors to use as features.  We also introduce cross validation using 5 as k.  Using 10-fold cross validation didn't make any difference.  Thus, we used 5-fold cross validation.
+```{r, modelRF, cache=TRUE}
+cntrl <- trainControl(method="repeatedcv", number=5, repeats=1)
+modRFFit <- randomForest(classe~roll_belt+num_window+magnet_dumbbell_y+yaw_belt+pitch_belt+pitch_forearm+magnet_dumbbell_z+magnet_dumbbell_x+accel_belt_z+magnet_belt_y+roll_dumbbell+accel_dumbbell_y+roll_forearm+magnet_belt_z+total_accel_belt+gyros_belt_z+accel_dumbbell_z,trControl=cntrl, data=training)
+predTrain <- predict(modFit, newdata=training)
+table(predTrain, training$classe)
+```
+when I used the train function from the caret package, building the  model took a long time.  I read in the discussion forum that calling the randomForest function directly instead of going through the caret package's train function was much more efficient. 
+
+Even with a reduced # of predictors, the accuracy is still 100%.  We need to test the model against the validation set.  I expect the accuracy to decrease but still very high.
+```{r, validation}
+predRF <- predict(modRFFit, validation)
+confusionMatrix(predRF, validation$classe)
+#length(predRF)
+table(predRF, validation$classe)
+qplot(predict(modRFFit, validation), classe, col=classe, data=validation)
+
+```
+
+The confusionMatrix result indicates that the out-of-sample error is 0.002. To be precise, both the table function and the plot show that there were some B misclassified as A, C misclassified as B, and D misiclassified as C.  A and E were all correctly classified.  I expect the accuracy on the test data to be similar to the result we got on the validation set.  
+
+Next, let's  test the model against the test set.  First, we read in the testing data.
+```{r, testData, cache=TRUE}
+if (!file.exists("./pml-testing.csv")) {
+   testurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+   download.file(testurl, "./pml-testing.csv")
+}
+testData <- read.csv("pml-testing.csv")
+dim(testData)
+```
+There are 20 rows in the testing set.  We need to find the classe (the fashion in which the exercise was performed) for each item using the model we've built.  In order to submit the classe generated for programmatic evalution, a text file will be created for each prediction.  The function was provided to us by the instructor.
+```{r, createOutFile}
+pml_write_files <- function(x){
+  n <- length(x)
+  for(i in 1:n){
+    filename <- paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+```
+We run the model against the testing set and produce output.  There should be 20 classifications.  We convert the output to 20 characters since that's what the automated evaluator expects.  We then call the pml_write_files function to generate 20 text files, one predicted classe per file.
+```{r, genOutput}
+predTest <- predict(modRFFit, newdata=testData)
+output <- as.character(predTest)
+#output
+pml_write_files(output)
+```
+This produces 20 text files with the prefix of "problem_id_" and the suffix of ".txt".  Each text file will be submitted for programmatic evaluation and is not part of this write-up.
